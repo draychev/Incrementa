@@ -10,6 +10,7 @@
 #include <vector>
 
 struct Card {
+    std::wstring id;
     std::wstring question;
     std::wstring answer;
 };
@@ -35,7 +36,7 @@ struct AppState {
     std::vector<Card> cards{};
     size_t currentCardIndex{0};
     bool answerVisible{false};
-    std::ofstream ratingLog{};
+    std::ofstream answerLog{};
     HFONT hFont{nullptr};
     AppControls controls{};
 };
@@ -57,8 +58,35 @@ constexpr int MIN_HEIGHT = 480;
 AppState g_state;
 }
 
-void AppendRatingToLog(size_t cardIndex, Rating rating) {
-    if (!g_state.ratingLog.is_open()) {
+std::wstring ToWide(const std::string& text) {
+    static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+    return converter.from_bytes(text);
+}
+
+std::string ToUtf8(const std::wstring& text) {
+    static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+    return converter.to_bytes(text);
+}
+
+std::string RatingToText(Rating rating) {
+    switch (rating) {
+    case Rating::Good:
+        return "good";
+    case Rating::Meh:
+        return "meh";
+    case Rating::Bad:
+        return "bad";
+    default:
+        return "unknown";
+    }
+}
+
+bool IsCardComplete(const Card& card) {
+    return !card.id.empty() && !card.question.empty() && !card.answer.empty();
+}
+
+void AppendRatingToLog(const Card& card, Rating rating) {
+    if (!g_state.answerLog.is_open() || card.id.empty()) {
         return;
     }
 
@@ -67,35 +95,17 @@ void AppendRatingToLog(size_t cardIndex, Rating rating) {
     std::tm localTime{};
     localtime_s(&localTime, &time);
 
-    char ratingChar = '?';
-    switch (rating) {
-    case Rating::Good:
-        ratingChar = 'G';
-        break;
-    case Rating::Meh:
-        ratingChar = 'M';
-        break;
-    case Rating::Bad:
-        ratingChar = 'B';
-        break;
-    }
-
-    g_state.ratingLog << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
-                      << '|' << cardIndex << '|' << ratingChar << "\n";
-    g_state.ratingLog.flush();
+    g_state.answerLog << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S")
+                      << '|' << ToUtf8(card.id) << '|' << RatingToText(rating) << "\n";
+    g_state.answerLog.flush();
 }
 
 std::vector<Card> LoadDefaultCards() {
     return {
-        {L"What is the capital of France?", L"Paris"},
-        {L"What is 2 + 2?", L"4"},
-        {L"Name the largest planet in our solar system.", L"Jupiter"},
+        {L"capital-france", L"What is the capital of France?", L"Paris"},
+        {L"math-basic-2-plus-2", L"What is 2 + 2?", L"4"},
+        {L"largest-planet", L"Name the largest planet in our solar system.", L"Jupiter"},
     };
-}
-
-std::wstring ToWide(const std::string& text) {
-    static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-    return converter.from_bytes(text);
 }
 
 std::string Trim(const std::string& text) {
@@ -139,7 +149,7 @@ std::vector<Card> LoadCardsFromYaml(const std::string& path) {
         }
 
         if (trimmed.rfind("- ", 0) == 0) {
-            if (inCard && !currentCard.question.empty() && !currentCard.answer.empty()) {
+            if (inCard && IsCardComplete(currentCard)) {
                 cards.push_back(currentCard);
             }
 
@@ -147,7 +157,9 @@ std::vector<Card> LoadCardsFromYaml(const std::string& path) {
             inCard = true;
 
             const std::string entry = Trim(trimmed.substr(2));
-            if (entry.rfind("question:", 0) == 0) {
+            if (entry.rfind("id:", 0) == 0) {
+                currentCard.id = ExtractValue(entry, "id");
+            } else if (entry.rfind("question:", 0) == 0) {
                 currentCard.question = ExtractValue(entry, "question");
             } else if (entry.rfind("answer:", 0) == 0) {
                 currentCard.answer = ExtractValue(entry, "answer");
@@ -159,14 +171,16 @@ std::vector<Card> LoadCardsFromYaml(const std::string& path) {
             continue;
         }
 
-        if (trimmed.rfind("question:", 0) == 0) {
+        if (trimmed.rfind("id:", 0) == 0) {
+            currentCard.id = ExtractValue(trimmed, "id");
+        } else if (trimmed.rfind("question:", 0) == 0) {
             currentCard.question = ExtractValue(trimmed, "question");
         } else if (trimmed.rfind("answer:", 0) == 0) {
             currentCard.answer = ExtractValue(trimmed, "answer");
         }
     }
 
-    if (inCard && !currentCard.question.empty() && !currentCard.answer.empty()) {
+    if (inCard && IsCardComplete(currentCard)) {
         cards.push_back(currentCard);
     }
 
@@ -253,7 +267,8 @@ void HandleRating(HWND hwnd, Rating rating) {
         return;
     }
 
-    AppendRatingToLog(g_state.currentCardIndex, rating);
+    const Card& card = g_state.cards[g_state.currentCardIndex % g_state.cards.size()];
+    AppendRatingToLog(card, rating);
     AdvanceToNextCard(hwnd);
 }
 
@@ -343,7 +358,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         g_state.cards = LoadCards();
-        g_state.ratingLog.open("ratings.log", std::ios::out | std::ios::app);
+        g_state.answerLog.open("answers.log", std::ios::out | std::ios::app);
 
         g_state.controls.hTopEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", nullptr,

@@ -1,7 +1,10 @@
 cards:
-  - question: What is the capital of France?
+  - id: capital-france
+    question: What is the capital of France?
     answer: Paris
-  - question: What is 2 + 2?
+  - id: math-basic-2-plus-2
+    question: What is 2 + 2?
     answer: 4
-  - question: Name the largest planet in our solar system.
+  - id: largest-planet
+    question: Name the largest planet in our solar system.
     answer: Jupiter
