@@ -1,8 +1,11 @@
 #include <windows.h>
 #include <chrono>
+#include <algorithm>
+#include <codecvt>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <locale>
 #include <string>
 #include <vector>
 
@@ -88,6 +91,95 @@ std::vector<Card> LoadDefaultCards() {
         {L"What is 2 + 2?", L"4"},
         {L"Name the largest planet in our solar system.", L"Jupiter"},
     };
+}
+
+std::wstring ToWide(const std::string& text) {
+    static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
+    return converter.from_bytes(text);
+}
+
+std::string Trim(const std::string& text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return "";
+    }
+
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::wstring ExtractValue(const std::string& line, const std::string& key) {
+    const auto prefix = key + ":";
+    if (line.rfind(prefix, 0) != 0) {
+        return L"";
+    }
+
+    const auto value = Trim(line.substr(prefix.size()));
+    return ToWide(value);
+}
+
+std::vector<Card> LoadCardsFromYaml(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return {};
+    }
+
+    std::vector<Card> cards;
+    Card currentCard{};
+    bool inCard = false;
+    std::string line;
+    while (std::getline(file, line)) {
+        const std::string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        if (trimmed == "cards:") {
+            continue;
+        }
+
+        if (trimmed.rfind("- ", 0) == 0) {
+            if (inCard && !currentCard.question.empty() && !currentCard.answer.empty()) {
+                cards.push_back(currentCard);
+            }
+
+            currentCard = Card{};
+            inCard = true;
+
+            const std::string entry = Trim(trimmed.substr(2));
+            if (entry.rfind("question:", 0) == 0) {
+                currentCard.question = ExtractValue(entry, "question");
+            } else if (entry.rfind("answer:", 0) == 0) {
+                currentCard.answer = ExtractValue(entry, "answer");
+            }
+            continue;
+        }
+
+        if (!inCard) {
+            continue;
+        }
+
+        if (trimmed.rfind("question:", 0) == 0) {
+            currentCard.question = ExtractValue(trimmed, "question");
+        } else if (trimmed.rfind("answer:", 0) == 0) {
+            currentCard.answer = ExtractValue(trimmed, "answer");
+        }
+    }
+
+    if (inCard && !currentCard.question.empty() && !currentCard.answer.empty()) {
+        cards.push_back(currentCard);
+    }
+
+    return cards;
+}
+
+std::vector<Card> LoadCards() {
+    const std::vector<Card> loadedCards = LoadCardsFromYaml("cards.yaml");
+    if (!loadedCards.empty()) {
+        return loadedCards;
+    }
+
+    return LoadDefaultCards();
 }
 
 HFONT CreateDefaultFont(HWND hwnd) {
@@ -250,7 +342,7 @@ void InitializeDpiAwareness() {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
-        g_state.cards = LoadDefaultCards();
+        g_state.cards = LoadCards();
         g_state.ratingLog.open("ratings.log", std::ios::out | std::ios::app);
 
         g_state.controls.hTopEdit = CreateWindowExW(
