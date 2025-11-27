@@ -2,6 +2,7 @@
 #include <chrono>
 #include <algorithm>
 #include <codecvt>
+#include <cwctype>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -39,6 +40,7 @@ struct AppState {
     std::ofstream answerLog{};
     HFONT hFont{nullptr};
     AppControls controls{};
+    HWND hMainWnd{nullptr};
 };
 
 namespace {
@@ -48,6 +50,10 @@ constexpr int ID_BTN_SHOWANSWER = 1003;
 constexpr int ID_BTN_GOOD = 1004;
 constexpr int ID_BTN_MEH = 1005;
 constexpr int ID_BTN_BAD = 1006;
+constexpr int ID_MENU_FILE_NEW_CARD = 2001;
+constexpr int ID_NEW_CARD_QUESTION = 3001;
+constexpr int ID_NEW_CARD_ANSWER = 3002;
+constexpr int ID_NEW_CARD_SAVE = 3003;
 
 constexpr int BTN_BAR_HEIGHT = 40;
 constexpr int REVEAL_HEIGHT = 40;
@@ -56,6 +62,8 @@ constexpr int MIN_WIDTH = 640;
 constexpr int MIN_HEIGHT = 480;
 
 AppState g_state;
+constexpr wchar_t MAIN_WINDOW_CLASS_NAME[] = L"QATrainerMainWindow";
+constexpr wchar_t NEW_CARD_WINDOW_CLASS_NAME[] = L"QATrainerNewCardWindow";
 }
 
 std::wstring ToWide(const std::string& text) {
@@ -66,6 +74,16 @@ std::wstring ToWide(const std::string& text) {
 std::string ToUtf8(const std::wstring& text) {
     static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
     return converter.to_bytes(text);
+}
+
+std::wstring TrimWide(const std::wstring& text) {
+    const auto first = text.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) {
+        return L"";
+    }
+
+    const auto last = text.find_last_not_of(L" \t\r\n");
+    return text.substr(first, last - first + 1);
 }
 
 std::string RatingToText(Rating rating) {
@@ -308,6 +326,165 @@ void LayoutControls(HWND hwnd, int width, int height) {
                buttonWidth, BTN_BAR_HEIGHT, TRUE);
 }
 
+bool IdExists(const std::wstring& id) {
+    return std::any_of(g_state.cards.begin(), g_state.cards.end(),
+                       [&id](const Card& card) { return card.id == id; });
+}
+
+std::wstring GenerateUniqueId() {
+    int counter = 1;
+    while (true) {
+        const std::wstring candidate = L"card-" + std::to_wstring(counter);
+        if (!IdExists(candidate)) {
+            return candidate;
+        }
+        ++counter;
+    }
+}
+
+std::wstring GetWindowTextWString(HWND hwnd) {
+    const int length = GetWindowTextLengthW(hwnd);
+    if (length <= 0) {
+        return L"";
+    }
+
+    std::wstring buffer(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(hwnd, buffer.data(), length + 1);
+    buffer.resize(length);
+    return buffer;
+}
+
+struct NewCardWindowState {
+    HWND hQuestionEdit{};
+    HWND hAnswerEdit{};
+    HWND hSaveButton{};
+};
+
+void LayoutNewCardControls(const NewCardWindowState& state, int width, int height) {
+    const int clientWidth = width;
+    const int clientHeight = height;
+    int availableHeight = clientHeight - BTN_BAR_HEIGHT - (3 * MARGIN);
+    if (availableHeight < 0) {
+        availableHeight = 0;
+    }
+
+    const int topHeight = static_cast<int>(availableHeight * 0.7);
+    const int bottomHeight = availableHeight - topHeight;
+
+    MoveWindow(state.hQuestionEdit, MARGIN, MARGIN, clientWidth - 2 * MARGIN, topHeight, TRUE);
+    MoveWindow(state.hAnswerEdit, MARGIN, MARGIN + topHeight + MARGIN,
+               clientWidth - 2 * MARGIN, bottomHeight, TRUE);
+    MoveWindow(state.hSaveButton, clientWidth - 100 - MARGIN,
+               clientHeight - BTN_BAR_HEIGHT, 100, BTN_BAR_HEIGHT - MARGIN, TRUE);
+}
+
+void ApplyFontToNewCardControls(const NewCardWindowState& state) {
+    const HWND controls[] = {state.hQuestionEdit, state.hAnswerEdit, state.hSaveButton};
+    for (HWND control : controls) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g_state.hFont), TRUE);
+    }
+}
+
+void HandleSaveNewCard(HWND hwnd, const NewCardWindowState& state) {
+    std::wstring question = TrimWide(GetWindowTextWString(state.hQuestionEdit));
+    std::wstring answer = TrimWide(GetWindowTextWString(state.hAnswerEdit));
+
+    if (question.empty() || answer.empty()) {
+        MessageBoxW(hwnd, L"Please enter both a question and an answer before saving.",
+                    L"New Card", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    const std::wstring id = GenerateUniqueId();
+    g_state.cards.push_back({id, question, answer});
+    g_state.currentCardIndex = g_state.cards.size() - 1;
+    LoadCurrentCard(g_state.hMainWnd);
+
+    MessageBoxW(hwnd, (L"New card saved with ID: " + id).c_str(), L"New Card",
+                MB_OK | MB_ICONINFORMATION);
+    DestroyWindow(hwnd);
+}
+
+LRESULT CALLBACK NewCardWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<NewCardWindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    switch (msg) {
+    case WM_CREATE: {
+        state = new NewCardWindowState{};
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+        state->hQuestionEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(ID_NEW_CARD_QUESTION),
+            GetModuleHandleW(nullptr), nullptr);
+
+        state->hAnswerEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+            0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(ID_NEW_CARD_ANSWER),
+            GetModuleHandleW(nullptr), nullptr);
+
+        state->hSaveButton = CreateWindowExW(
+            0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0,
+            0, 0, hwnd, reinterpret_cast<HMENU>(ID_NEW_CARD_SAVE), GetModuleHandleW(nullptr),
+            nullptr);
+
+        ApplyFontToNewCardControls(*state);
+        return 0;
+    }
+    case WM_SIZE: {
+        if (state) {
+            const int width = LOWORD(lParam);
+            const int height = HIWORD(lParam);
+            LayoutNewCardControls(*state, width, height);
+        }
+        return 0;
+    }
+    case WM_COMMAND: {
+        if (LOWORD(wParam) == ID_NEW_CARD_SAVE && state) {
+            HandleSaveNewCard(hwnd, *state);
+            return 0;
+        }
+        break;
+    }
+    case WM_DESTROY: {
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    }
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void CreateNewCardWindow(HINSTANCE hInstance) {
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, NEW_CARD_WINDOW_CLASS_NAME, L"New Card",
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 480, 360, g_state.hMainWnd, nullptr, hInstance,
+                                nullptr);
+    if (hwnd) {
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+    }
+}
+
+void InitializeMenu(HWND hwnd) {
+    HMENU hMenuBar = CreateMenu();
+    HMENU hFileMenu = CreateMenu();
+    HMENU hEditMenu = CreateMenu();
+    HMENU hViewMenu = CreateMenu();
+
+    AppendMenuW(hFileMenu, MF_STRING, ID_MENU_FILE_NEW_CARD, L"&New Card");
+
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hFileMenu), L"&File");
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hEditMenu), L"&Edit");
+    AppendMenuW(hMenuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(hViewMenu), L"&View");
+
+    SetMenu(hwnd, hMenuBar);
+}
+
 bool HandleKeyDown(HWND hwnd, WPARAM key) {
     switch (key) {
     case VK_ESCAPE:
@@ -359,6 +536,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CREATE: {
         g_state.cards = LoadCards();
         g_state.answerLog.open("answers.log", std::ios::out | std::ios::app);
+        g_state.hMainWnd = hwnd;
+
+        InitializeMenu(hwnd);
 
         g_state.controls.hTopEdit = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", nullptr,
@@ -423,6 +603,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case ID_BTN_BAD:
             HandleRating(hwnd, Rating::Bad);
             break;
+        case ID_MENU_FILE_NEW_CARD:
+            CreateNewCardWindow(GetModuleHandleW(nullptr));
+            break;
         default:
             break;
         }
@@ -444,24 +627,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     InitializeDpiAwareness();
 
-    const wchar_t CLASS_NAME[] = L"QATrainerMainWindow";
+    WNDCLASSEXW mainWc{};
+    mainWc.cbSize = sizeof(WNDCLASSEXW);
+    mainWc.style = CS_HREDRAW | CS_VREDRAW;
+    mainWc.lpfnWndProc = WndProc;
+    mainWc.hInstance = hInstance;
+    mainWc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    mainWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    mainWc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    mainWc.lpszClassName = MAIN_WINDOW_CLASS_NAME;
+    mainWc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
 
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(WNDCLASSEXW);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = CLASS_NAME;
-    wc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
-
-    if (!RegisterClassExW(&wc)) {
+    if (!RegisterClassExW(&mainWc)) {
         return 0;
     }
 
-    HWND hwnd = CreateWindowExW(0, CLASS_NAME, L"Q/A Trainer", WS_OVERLAPPEDWINDOW,
+    WNDCLASSEXW newCardWc{};
+    newCardWc.cbSize = sizeof(WNDCLASSEXW);
+    newCardWc.style = CS_HREDRAW | CS_VREDRAW;
+    newCardWc.lpfnWndProc = NewCardWndProc;
+    newCardWc.hInstance = hInstance;
+    newCardWc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    newCardWc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    newCardWc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    newCardWc.lpszClassName = NEW_CARD_WINDOW_CLASS_NAME;
+    newCardWc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
+
+    if (!RegisterClassExW(&newCardWc)) {
+        return 0;
+    }
+
+    HWND hwnd = CreateWindowExW(0, MAIN_WINDOW_CLASS_NAME, L"Q/A Trainer", WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr,
                                 hInstance, nullptr);
 
